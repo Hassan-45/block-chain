@@ -1,115 +1,72 @@
 "use strict";
-// required npm install blind-signatures
-const blindSignatures = require('blind-signatures');
 
-const { Coin, COIN_RIS_LENGTH, IDENT_STR, BANK_STR } = require('./coin.js');
-const utils = require('./utils.js');
+let blindSignatures = require("blind-signatures");
+let SpyAgency = require("./spyAgency.js").SpyAgency;
 
-// Details about the bank's key.
-const BANK_KEY = blindSignatures.keyGeneration({ b: 2048 });
-const N = BANK_KEY.keyPair.n.toString();
-const E = BANK_KEY.keyPair.e.toString();
+// Function to create a document with diplomatic credentials
+function makeDocument(coverName) {
+  return `The bearer of this signed document, ${coverName}, has full diplomatic immunity.`;
+}
 
-/**
- * Function signing the coin on behalf of the bank.
- * 
- * @param blindedCoinHash - the blinded hash of the coin.
- * 
- * @returns the signature of the bank for this coin.
- */
-function signCoin(blindedCoinHash) {
-  return blindSignatures.sign({
-      blinded: blindedCoinHash,
-      key: BANK_KEY,
+// Function to blind the document
+function blind(msg, n, e) {
+  return blindSignatures.blind({
+    message: msg,
+    N: n,
+    E: e,
   });
 }
 
-/**
- * Parses a string representing a coin, and returns the left/right identity string hashes.
- *
- * @param {string} s - string representation of a coin.
- * 
- * @returns {[[string]]} - two arrays of strings of hashes, committing the owner's identity.
- */
-function parseCoin(s) {
-  let [cnst, amt, guid, leftHashes, rightHashes] = s.split('-');
-  if (cnst !== BANK_STR) {
-    throw new Error(`Invalid identity string: ${cnst} received, but ${BANK_STR} expected`);
-  }
-  let lh = leftHashes.split(',');
-  let rh = rightHashes.split(',');
-  return [lh, rh];
-}
-
-/**
- * Procedure for a merchant accepting a token. The merchant randomly selects
- * the left or right halves of the identity string.
- * 
- * @param {Coin} coin - the coin that a purchaser wants to use.
- * 
- * @returns {[String]} - an array of strings, each holding half of the user's identity.
- */
-function acceptCoin(coin) {
-  // 1) Verify the signature
-  const isValid = blindSignatures.verify({
-    unblinded: coin.signature,
-    N: coin.n,
-    E: coin.e,
-    message: coin.toString()
+// Function to unblind the signature
+function unblind(blindingFactor, sig, n) {
+  return blindSignatures.unblind({
+    signed: sig,
+    N: n,
+    r: blindingFactor,
   });
-  if (!isValid) {
-    throw new Error("Invalid coin signature.");
-  }
-
-  // 2) Gather the elements of the RIS, verifying the hashes.
-  let [leftHashes, rightHashes] = parseCoin(coin.toString());
-  let ris = [];
-  for (let i = 0; i < COIN_RIS_LENGTH; i++) {
-    let isLeft = utils.randInt(2) === 0; // Randomly choose left or right
-    let chosen = coin.getRis(isLeft, i);
-    let expectedHash = isLeft ? leftHashes[i] : rightHashes[i];
-    if (utils.hash(chosen) !== expectedHash) {
-      throw new Error("RIS hash verification failed.");
-    }
-    ris.push(chosen);
-  }
-  return ris;
 }
 
-/**
- * Determines who cheated if a token has been double-spent.
- * 
- * @param guid - Unique identifier for coin.
- * @param ris1 - Identity string reported by first merchant.
- * @param ris2 - Identity string reported by second merchant.
- */
-function determineCheater(guid, ris1, ris2) {
-  for (let i = 0; i < COIN_RIS_LENGTH; i++) {
-    let xorResult = Buffer.from(ris1[i], 'hex').map((b, index) => b ^ Buffer.from(ris2[i], 'hex')[index]);
-    let xorString = xorResult.toString();
-    if (xorString.startsWith(IDENT_STR)) {
-      console.log(`The cheater is the original coin owner: ${xorString.split(':')[1]}`);
-      return;
-    }
-  }
-  console.log("The merchant is the cheater!");
+// Create the spy agency object
+let agency = new SpyAgency();
+
+// Prepare documents and fake identities
+let documents = [];
+let blindDocs = [];
+let blindingFactors = [];
+
+for (let i = 0; i < 10; i++) {
+  let coverName = `Agent ${i + 1}`;
+  let doc = makeDocument(coverName);
+  documents.push(doc);
+
+  let { blinded, r } = blind(doc, agency.n, agency.e);
+  blindDocs.push(blinded);
+  blindingFactors.push(r);
 }
 
-let coin = new Coin('alice', 20, N, E);
+// Sign the documents by the agency
+agency.signDocument(blindDocs, (selected, verifyAndSign) => {
+  console.log(`Selected document index: ${selected}`);
 
-coin.signature = signCoin(coin.blinded);
+  // Prepare verification data, excluding the selected document
+  let verifiedDocs = documents.map((doc, index) =>
+    index === selected ? undefined : doc
+  );
+  let verifiedFactors = blindingFactors.map((factor, index) =>
+    index === selected ? undefined : factor
+  );
 
-coin.unblind();
+  // Call the verification and signing function
+  let blindedSignature = verifyAndSign(verifiedFactors, verifiedDocs);
 
-// Merchant 1 accepts the coin.
-let ris1 = acceptCoin(coin);
+  // Unblind and retrieve the real signature
+  let signature = unblind(
+    blindingFactors[selected],
+    blindedSignature,
+    agency.n
+  );
 
-// Merchant 2 accepts the same coin.
-let ris2 = acceptCoin(coin);
-
-// The bank realizes that there is an issue and identifies Alice as the cheater.
-determineCheater(coin.guid, ris1, ris2);
-
-console.log();
-// On the other hand, if the RIS strings are the same, the merchant is marked as the cheater.
-determineCheater(coin.guid, ris1, ris1);
+  // Print the required results
+  console.log(`Signed document: ${documents[selected]}`);
+  console.log(`Signature: ${signature}`);
+});
